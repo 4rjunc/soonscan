@@ -2,6 +2,14 @@
 name = "soonscan"
 version = "0.1.0"
 edition = "2021"
+authors = ["Arjun C <arjunmundamani@gmail.com>"]
+license = "MIT OR Apache-2.0"
+description = "TUI Blockchain explorer for SOON Blockchain"
+readme = "README.md"
+homepage = "https://github.com/4rjunc/soonscan"
+repository = "https://github.com/4rjunc/soonscan"
+keywords = ["cli", "search", "demo", "tui", "Blockchain"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 chrono = "0.4.38"
