@@ -1,27 +1,25 @@
 use std::io;
-use std::env;
 
 use reqwest::Client;
 use serde_json::Value;
 
-use crossterm::terminal;
 use ratatui::{
     crossterm::event::{self, KeyCode, KeyEventKind, Event, KeyEvent},
     buffer::Buffer,
     layout::{Rect, Constraint},
     style::Stylize,
     symbols::border,
-    text::{Line, Text},
-    widgets::{Block, Paragraph, Widget, Table, Row, Cell},
+    text::Line,
+    widgets::{Block, Widget, Table, Row, Cell},
     DefaultTerminal, Frame,
 };
 
 // This will store the state of the application
 #[derive(Debug, Default)]
 pub struct App {
-    query: String,
-    json_response: Option<Value>, // Stores the response from the blockchain query
-    exit: bool,
+    pub query: String,
+    pub json_response: Option<Value>, // Stores the response from the blockchain query
+    pub exit: bool,
 }
 
 impl App {
