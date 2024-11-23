@@ -1,28 +1,33 @@
 use std::io;
 use std::env;
 
+use reqwest::Client;
+use serde_json::Value;
+
 use crossterm::terminal;
 use ratatui::{
     crossterm::event::{self, KeyCode, KeyEventKind, Event, KeyEvent},
     buffer::Buffer,
-    layout::Rect,
+    layout::{Rect, Constraint},
     style::Stylize,
     symbols::border,
     text::{Line, Text},
-    widgets::{Block, Paragraph, Widget},
+    widgets::{Block, Paragraph, Widget, Table, Row, Cell},
     DefaultTerminal, Frame,
 };
 
-// this is will store the state of the application
+// This will store the state of the application
 #[derive(Debug, Default)]
 pub struct App {
     query: String,
-    counter: u8,
+    json_response: Option<Value>, // Stores the response from the blockchain query
     exit: bool,
 }
 
 impl App {
-    pub fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()>{
+    pub async fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
+        self.fetch_transaction().await.expect("Failed to fetch transaction");
+
         while !self.exit {
             terminal.draw(|frame| self.draw(frame))?;
             self.handle_events()?;
@@ -30,90 +35,167 @@ impl App {
         Ok(())
     }
 
-    fn draw(&self, frame: &mut Frame){
+    fn draw(&self, frame: &mut Frame) {
         frame.render_widget(self, frame.area());
     }
 
-    fn handle_events(&mut self) -> io::Result<()>{
-        match event::read()?{
+    fn handle_events(&mut self) -> io::Result<()> {
+        match event::read()? {
             Event::Key(key_events) if key_events.kind == KeyEventKind::Press => {
                 self.handle_key_event(key_events);
             }
-            _=>{}
+            _ => {}
         };
         Ok(())
     }
 
-    fn handle_key_event(&mut self, key_events: KeyEvent){
+    fn handle_key_event(&mut self, key_events: KeyEvent) {
         match key_events.code {
             KeyCode::Char('q') => self.exit(),
-            KeyCode::Left => self.decrement_counter(),
-            KeyCode::Right => self.increment_counter(),
-            _=> {} 
+            _ => {}
         }
     }
 
-    fn exit(&mut self){
+    fn exit(&mut self) {
         self.exit = true;
     }
 
-    fn decrement_counter(&mut self){
-        self.counter -= 1;
-    }
+    async fn fetch_transaction(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        // JSON payload for the blockchain query
+        let payload = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getTransaction",
+            "params": [
+                self.query,
+                "json"
+            ]
+        });
 
-    fn increment_counter(&mut self){
-        self.counter += 1;
-    }
+        // Create HTTP client
+        let client = Client::new();
 
-    fn handle_query(&self){
-        println!("Querying blockchain for :{}", self.query);
+        // Perform the POST request
+        let response = client
+            .post("https://rpc.devnet.soo.network/rpc")
+            .header("Content-Type", "application/json")
+            .json(&payload)
+            .send()
+            .await?;
+
+        if response.status().is_success() {
+            // Parse and store the JSON response
+            self.json_response = Some(response.json().await?);
+        } else {
+            eprintln!("Request failed with status: {}", response.status());
+            self.json_response = None;
+        }
+
+        Ok(())
     }
-    
 }
 
 impl Widget for &App {
-    fn render(self, area: Rect, buf: &mut Buffer){
+    fn render(self, area: Rect, buf: &mut Buffer) {
         let title = Line::from(" SOONSCAN ".bold().red());
         let instruction = Line::from(vec![
-            " Decrement ".into(),
-            "<Left>".blue().bold(),
-            " Increment ".into(),
-            "<Right>".blue().bold(),
             " Quit ".into(),
             "<Q> ".blue().bold(),
         ]);
+
         let block = Block::bordered()
             .title(title.centered())
             .title_bottom(instruction.centered())
             .border_set(border::THICK);
 
-        let counter_text = Text::from(vec![Line::from(vec![
-            "Value:".into(),
-            self.counter.to_string().yellow(),
-        ])]);
+        // Header displaying the Transaction Hash
+        let header = vec![
+            Row::new(vec![
+                Cell::from("Transaction Hash:").bold(),
+                Cell::from(self.query.clone().yellow()),
+            ]),
+        ];
 
-        let query_text = Text::from(vec![Line::from(vec![
-            "Query:".into(),
-            self.query.clone().yellow(),
-        ])]);
+        // Parse the JSON response into rows for displaying key-value pairs
+        let rows = if let Some(json_response) = &self.json_response {
+            let result = json_response.get("result").and_then(|r| r.as_object());
+            if let Some(result_obj) = result {
+                let mut rows = vec![];
 
-        Paragraph::new(query_text)
-            .centered()
+                // Extract relevant fields from the result
+                if let Some(block_time) = result_obj.get("blockTime") {
+                    rows.push(Row::new(vec![
+                        Cell::from("Block Time:").bold(),
+                        Cell::from(block_time.to_string().yellow()),
+                    ]));
+                }
+                if let Some(meta) = result_obj.get("meta").and_then(|m| m.as_object()) {
+                     if let Some(fee) = meta.get("fee") {
+                        let fee_sol = fee.as_u64().unwrap_or(0) as f64 / 1_000_000_000.0; // Convert lamports to SOL
+                        rows.push(Row::new(vec![
+                            Cell::from("Fee (SOL):").bold(),
+                            Cell::from(format!("◎ {:.8}", fee_sol).yellow()),
+                        ]));
+                    }
+                    if let Some(status) = meta.get("status") {
+                        rows.push(Row::new(vec![
+                            Cell::from("Status:").bold(),
+                            Cell::from(status.to_string().yellow()),
+                        ]));
+                    }
+                    if let Some(compute_units) = meta.get("computeUnitsConsumed") {
+                        rows.push(Row::new(vec![
+                            Cell::from("Compute Units Consumed:").bold(),
+                            Cell::from(compute_units.to_string().yellow()),
+                        ]));
+                    }
+                }
+
+                // Extract signatures
+                if let Some(signatures) = result_obj.get("signatures") {
+                    if let Some(signature_arr) = signatures.as_array() {
+                        for signature in signature_arr {
+                            rows.push(Row::new(vec![
+                                Cell::from("Signature:").bold(),
+                                Cell::from(signature.to_string().yellow()),
+                            ]));
+                        }
+                    }
+                }
+
+                rows
+            } else {
+                vec![Row::new(vec![Cell::from("Invalid JSON response.")])]
+            }
+        } else {
+            vec![Row::new(vec![Cell::from("No response available.".bold().red())])]
+        };
+
+        // Define column widths
+        let widths = [
+            Constraint::Length(20), // Key column width
+            Constraint::Percentage(80), // Value column takes remaining space
+        ];
+
+        // Create the table
+        let table = Table::new(header.into_iter().chain(rows), &widths)
             .block(block)
-            .render(area, buf)
+            .column_spacing(2);
+
+        table.render(area, buf);
     }
-    
 }
 
-fn main() -> io::Result<()> {
-
+#[tokio::main]
+async fn main() -> io::Result<()> {
     let args: Vec<String> = env::args().collect();
 
-    // Example: Take command-line argument for initial query (address or transaction hash)
+    // Take command-line argument for initial query (transaction hash)
     let initial_query = if args.len() > 1 {
-        args[1].clone() // Use the provided argument (address or hash)
+        args[1].clone() // Use the provided argument (transaction hash)
     } else {
-        String::new() // Default to an empty string if no argument is provided
+        eprintln!("Error: Transaction hash is required as a command-line argument.");
+        std::process::exit(1);
     };
 
     let mut terminal = ratatui::init();
@@ -122,55 +204,9 @@ fn main() -> io::Result<()> {
         ..App::default()
     };
 
-    let app_result = app.run(&mut terminal);
+    let app_result = app.run(&mut terminal).await;
     ratatui::restore();
     app_result
 }
 
-//testing 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use ratatui::style::Style;
 
-    #[test]
-    fn render() {
-        let app = App::default();
-        let mut buf = Buffer::empty(Rect::new(0, 0, 50, 4));
-
-        app.render(buf.area, &mut buf);
-
-        let mut expected = Buffer::with_lines(vec![
-            "┏━━━━━━━━━━━━━ Counter App Tutorial ━━━━━━━━━━━━━┓",
-            "┃                    Value: 0                    ┃",
-            "┃                                                ┃",
-            "┗━ Decrement <Left> Increment <Right> Quit <Q> ━━┛",
-        ]);
-        let title_style = Style::new().bold();
-        let counter_style = Style::new().yellow();
-        let key_style = Style::new().blue().bold();
-        expected.set_style(Rect::new(14, 0, 22, 1), title_style);
-        expected.set_style(Rect::new(28, 1, 1, 1), counter_style);
-        expected.set_style(Rect::new(13, 3, 6, 1), key_style);
-        expected.set_style(Rect::new(30, 3, 7, 1), key_style);
-        expected.set_style(Rect::new(43, 3, 4, 1), key_style);
-
-        assert_eq!(buf, expected);
-    }
-
-    #[test]
-    fn handle_key_event() -> io::Result<()> {
-        let mut app = App::default();
-        app.handle_key_event(KeyCode::Right.into());
-        assert_eq!(app.counter, 1);
-
-        app.handle_key_event(KeyCode::Left.into());
-        assert_eq!(app.counter, 0);
-
-        let mut app = App::default();
-        app.handle_key_event(KeyCode::Char('q').into());
-        assert!(app.exit);
-
-        Ok(())
-    }
-}
