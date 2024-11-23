@@ -14,17 +14,16 @@ use ratatui::{
     DefaultTerminal, Frame,
 };
 
-// This will store the state of the application
 #[derive(Debug, Default)]
 pub struct App {
     pub query: String,
-    pub json_response: Option<Value>, // Stores the response from the blockchain query
+    pub json_response: Option<Value>,
     pub exit: bool,
 }
 
 impl App {
     pub async fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
-        self.fetch_transaction().await.expect("Failed to fetch transaction");
+        self.fetch_data().await.expect("Failed to fetch data");
 
         while !self.exit {
             terminal.draw(|frame| self.draw(frame))?;
@@ -58,22 +57,21 @@ impl App {
         self.exit = true;
     }
 
-    async fn fetch_transaction(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        // JSON payload for the blockchain query
+    async fn fetch_data(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let method = if self.query.len() == 44 {
+            "getAccountInfo"
+        } else {
+            "getTransaction"
+        };
+
         let payload = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
-            "method": "getTransaction",
-            "params": [
-                self.query,
-                "json"
-            ]
+            "method": method,
+            "params": [self.query, {"encoding": "base58"}]
         });
 
-        // Create HTTP client
         let client = Client::new();
-
-        // Perform the POST request
         let response = client
             .post("https://rpc.devnet.soo.network/rpc")
             .header("Content-Type", "application/json")
@@ -82,7 +80,6 @@ impl App {
             .await?;
 
         if response.status().is_success() {
-            // Parse and store the JSON response
             self.json_response = Some(response.json().await?);
         } else {
             eprintln!("Request failed with status: {}", response.status());
@@ -90,6 +87,12 @@ impl App {
         }
 
         Ok(())
+    }
+
+    fn format_timestamp(&self, timestamp: i64) -> String {
+        use chrono::{DateTime, TimeZone, Utc};
+        let dt: DateTime<Utc> = Utc.timestamp_opt(timestamp, 0).unwrap();
+        dt.format("%Y-%m-%d %H:%M:%S UTC").to_string()
     }
 }
 
@@ -106,82 +109,119 @@ impl Widget for &App {
             .title_bottom(instruction.centered())
             .border_set(border::THICK);
 
-        // Header displaying the Transaction Hash
-        let header = vec![
+        let mut rows = vec![
             Row::new(vec![
-                Cell::from("Transaction Hash:").bold(),
+                Cell::from("Query:").bold(),
                 Cell::from(self.query.clone().yellow()),
             ]),
         ];
 
-        // Parse the JSON response into rows for displaying key-value pairs
-        let rows = if let Some(json_response) = &self.json_response {
-            let result = json_response.get("result").and_then(|r| r.as_object());
-            if let Some(result_obj) = result {
-                let mut rows = vec![];
-
-                // Extract relevant fields from the result
-                if let Some(block_time) = result_obj.get("blockTime") {
-                    rows.push(Row::new(vec![
-                        Cell::from("Block Time:").bold(),
-                        Cell::from(block_time.to_string().yellow()),
-                    ]));
+        if let Some(json_response) = &self.json_response {
+            if let Some(result) = json_response.get("result").and_then(|r| r.as_object()) {
+                // Account Info Response
+                if let Some(value) = result.get("value").and_then(|v| v.as_object()) {
+                    rows.extend(vec![
+                        Row::new(vec![
+                            Cell::from("Type:").bold(),
+                            Cell::from("Account Info".blue()),
+                        ]),
+                        Row::new(vec![
+                            Cell::from("Balance:").bold(),
+                            Cell::from(format!("◎ {:.9}", value.get("lamports").and_then(|l| l.as_u64()).unwrap_or(0) as f64 / 1_000_000_000.0).yellow()),
+                        ]),
+                        Row::new(vec![
+                            Cell::from("Owner:").bold(),
+                            Cell::from(value.get("owner").and_then(|o| o.as_str()).unwrap_or("N/A").yellow()),
+                        ]),
+                        Row::new(vec![
+                            Cell::from("Executable:").bold(),
+                            Cell::from(if value.get("executable").and_then(|e| e.as_bool()).unwrap_or(false) {
+                                "Yes".green()
+                            } else {
+                                "No".red()
+                            }),
+                        ]),
+                        Row::new(vec![
+                            Cell::from("Space:").bold(),
+                            Cell::from(value.get("space").and_then(|s| s.as_u64()).unwrap_or(0).to_string().yellow()),
+                        ]),
+                    ]);
                 }
-                if let Some(meta) = result_obj.get("meta").and_then(|m| m.as_object()) {
-                     if let Some(fee) = meta.get("fee") {
-                        let fee_sol = fee.as_u64().unwrap_or(0) as f64 / 1_000_000_000.0; // Convert lamports to SOL
-                        rows.push(Row::new(vec![
-                            Cell::from("Fee (SOL):").bold(),
-                            Cell::from(format!("◎ {:.8}", fee_sol).yellow()),
-                        ]));
-                    }
-                    if let Some(status) = meta.get("status") {
-                        rows.push(Row::new(vec![
+                // Transaction Response
+                else if let Some(meta) = result.get("meta").and_then(|m| m.as_object()) {
+                    rows.extend(vec![
+                        Row::new(vec![
+                            Cell::from("Type:").bold(),
+                            Cell::from("Transaction".blue()),
+                        ]),
+                        Row::new(vec![
+                            Cell::from("Block Time:").bold(),
+                            Cell::from(result.get("blockTime")
+                                .and_then(|t| t.as_i64())
+                                .map(|t| self.format_timestamp(t))
+                                .unwrap_or_else(|| "N/A".to_string())
+                                .yellow()),
+                        ]),
+                        Row::new(vec![
                             Cell::from("Status:").bold(),
-                            Cell::from(status.to_string().yellow()),
-                        ]));
-                    }
-                    if let Some(compute_units) = meta.get("computeUnitsConsumed") {
-                        rows.push(Row::new(vec![
-                            Cell::from("Compute Units Consumed:").bold(),
-                            Cell::from(compute_units.to_string().yellow()),
-                        ]));
-                    }
-                }
+                            Cell::from(if meta.get("status").and_then(|s| s.get("Ok")).is_some() {
+                                "Success".green()
+                            } else {
+                                "Failed".red()
+                            }),
+                        ]),
+                        Row::new(vec![
+                            Cell::from("Fee:").bold(),
+                            Cell::from(format!("◎ {:.9}", meta.get("fee").and_then(|f| f.as_u64()).unwrap_or(0) as f64 / 1_000_000_000.0).yellow()),
+                        ]),
+                        Row::new(vec![
+                            Cell::from("Compute Units:").bold(),
+                            Cell::from(meta.get("computeUnitsConsumed")
+                                .and_then(|c| c.as_u64())
+                                .map(|c| c.to_string())
+                                .unwrap_or_else(|| "N/A".to_string())
+                                .yellow()),
+                        ]),
+                    ]);
 
-                // Extract signatures
-                if let Some(signatures) = result_obj.get("signatures") {
-                    if let Some(signature_arr) = signatures.as_array() {
-                        for signature in signature_arr {
+                    // Add balance changes
+                    if let (Some(pre), Some(post)) = (
+                        meta.get("preBalances").and_then(|b| b.as_array()),
+                        meta.get("postBalances").and_then(|b| b.as_array()),
+                    ) {
+                        for (i, (pre_bal, post_bal)) in pre.iter().zip(post.iter()).enumerate() {
+                            let pre_value = pre_bal.as_u64().unwrap_or(0) as f64 / 1_000_000_000.0;
+                            let post_value = post_bal.as_u64().unwrap_or(0) as f64 / 1_000_000_000.0;
+                            let change = post_value - pre_value;
+                            
                             rows.push(Row::new(vec![
-                                Cell::from("Signature:").bold(),
-                                Cell::from(signature.to_string().yellow()),
+                                Cell::from(format!("Balance Change {}:", i)).bold(),
+                                Cell::from(format!("◎ {:.9} → ◎ {:.9} (Δ {:.9})",
+                                    pre_value,
+                                    post_value,
+                                    change
+                                ).yellow()),
                             ]));
                         }
                     }
                 }
-
-                rows
-            } else {
-                vec![Row::new(vec![Cell::from("Invalid JSON response.")])]
             }
         } else {
-            vec![Row::new(vec![Cell::from("No response available.".bold().red())])]
-        };
+            rows.push(Row::new(vec![
+                Cell::from("Status:").bold(),
+                Cell::from("No response available".red()),
+            ]));
+        }
 
-        // Define column widths
         let widths = [
-            Constraint::Length(20), // Key column width
-            Constraint::Percentage(80), // Value column takes remaining space
+            Constraint::Length(20),
+            Constraint::Percentage(80),
         ];
 
-        // Create the table
-        let table = Table::new(header.into_iter().chain(rows), &widths)
+        let table = Table::new(rows, &widths)
             .block(block)
             .column_spacing(2);
 
         table.render(area, buf);
     }
 }
-
-
