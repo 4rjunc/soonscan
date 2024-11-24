@@ -17,6 +17,7 @@ use ratatui::{
 #[derive(Debug, Default)]
 pub struct App {
     pub query: String,
+    pub input: String,
     pub json_response: Option<Value>,
     pub exit: bool,
 }
