@@ -1,63 +1,152 @@
 use std::io;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 use reqwest::Client;
 use serde_json::Value;
-
 use ratatui::{
     crossterm::event::{self, KeyCode, KeyEventKind, Event, KeyEvent},
     buffer::Buffer,
-    layout::{Rect, Constraint},
-    style::Stylize,
+    layout::{Rect, Constraint, Layout},
+    style::{Style, Stylize},
     symbols::border,
     text::Line,
-    widgets::{Block, Widget, Table, Row, Cell},
-    DefaultTerminal, Frame,
+    widgets::{Block, Widget, Table, Row, Cell, Paragraph},
+    Terminal, Frame,
 };
+use ratatui::backend::CrosstermBackend;
 
-#[derive(Debug, Default)]
+
+
+#[derive(Debug)]
 pub struct App {
     pub query: String,
-    pub input: String,
+    pub input_mode: InputMode,
     pub json_response: Option<Value>,
     pub exit: bool,
+    client: Client,
+}
+
+#[derive(Debug)]
+pub enum InputMode {
+    Normal,
+    Editing,
+}
+
+impl Default for App {
+    fn default() -> Self {
+        Self {
+            query: String::new(),
+            input_mode: InputMode::Normal,
+            json_response: None,
+            exit: false,
+            client: Client::new(),
+        }
+    }
 }
 
 impl App {
-    pub async fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
-        self.fetch_data().await.expect("Failed to fetch data");
-
-        while !self.exit {
-            terminal.draw(|frame| self.draw(frame))?;
-            self.handle_events()?;
+    pub async fn run(app: Arc<Mutex<App>>, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
+        loop {
+            {
+                let app = app.lock().await;
+                if app.exit {
+                    break;
+                }
+                terminal.draw(|frame| app.draw(frame))?;
+            }
+            
+            if let Ok(should_break) = App::handle_events(Arc::clone(&app)).await {
+                if should_break {
+                    break;
+                }
+            }
         }
         Ok(())
     }
 
     fn draw(&self, frame: &mut Frame) {
-        frame.render_widget(self, frame.area());
-    }
+        let chunks = Layout::vertical([
+            Constraint::Length(3),  // Input field
+            Constraint::Min(1),     // Results area
+        ])
+        .split(frame.area());
 
-    fn handle_events(&mut self) -> io::Result<()> {
-        match event::read()? {
-            Event::Key(key_events) if key_events.kind == KeyEventKind::Press => {
-                self.handle_key_event(key_events);
-            }
-            _ => {}
+        // Render input field
+        let input_title = match self.input_mode {
+            InputMode::Normal => " SOONSCAN (Press 'e' to edit) ".bold(),
+            InputMode::Editing => " SOONSCAN (Press 'Enter' to submit, 'Esc' to cancel) ".bold(),
         };
-        Ok(())
+
+        let input = Paragraph::new(self.query.as_str())
+            .style(match self.input_mode {
+                InputMode::Normal => Style::default(),
+                InputMode::Editing => Style::default().yellow(),
+            })
+            .block(Block::bordered().title(input_title));
+        frame.render_widget(input, chunks[0]);
+
+        // Render results area
+        frame.render_widget(self, chunks[1]);
     }
 
-    fn handle_key_event(&mut self, key_events: KeyEvent) {
-        match key_events.code {
-            KeyCode::Char('q') => self.exit(),
-            _ => {}
+     async fn handle_events(app: Arc<Mutex<App>>) -> io::Result<bool> {
+        if let Event::Key(key_event) = event::read()? {
+            if key_event.kind == KeyEventKind::Press {
+                match key_event.code {
+                    KeyCode::Char('q') => {
+                        let mut app = app.lock().await;
+                        app.exit = true;
+                        return Ok(true);
+                    },
+                    KeyCode::Char('e') => {
+                        let mut app = app.lock().await;
+                        if matches!(app.input_mode, InputMode::Normal) {
+                            app.input_mode = InputMode::Editing;
+                        }
+                    },
+                    KeyCode::Esc => {
+                        let mut app = app.lock().await;
+                        app.input_mode = InputMode::Normal;
+                    },
+                    KeyCode::Enter => {
+                        let mut app = app.lock().await;
+                        if matches!(app.input_mode, InputMode::Editing) {
+                            app.input_mode = InputMode::Normal;
+                            if !app.query.is_empty() {
+                                app.fetch_data().await.unwrap_or_else(|e| eprintln!("Error: {}", e));
+                            }
+                        }
+                    },
+                    // Handle paste events (Ctrl+V)
+                    KeyCode::Char('v') => {
+                        let mut app = app.lock().await;
+                        if matches!(app.input_mode, InputMode::Editing) && key_event.modifiers.contains(event::KeyModifiers::CONTROL) {
+                            if let Ok(clipboard_content) = cli_clipboard::get_contents() {
+                                app.query.push_str(&clipboard_content);
+                            }
+                        } else if matches!(app.input_mode, InputMode::Editing) {
+                            app.query.push('v');
+                        }
+                    },
+                    KeyCode::Char(c) => {
+                        let mut app = app.lock().await;
+                        if matches!(app.input_mode, InputMode::Editing) {
+                            app.query.push(c);
+                        }
+                    },
+                    KeyCode::Backspace => {
+                        let mut app = app.lock().await;
+                        if matches!(app.input_mode, InputMode::Editing) {
+                            app.query.pop();
+                        }
+                    },
+                    _ => {},
+                }
+            }
         }
+        Ok(false)
     }
-
-    fn exit(&mut self) {
-        self.exit = true;
-    }
-
     async fn fetch_data(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let method = if self.query.len() == 44 {
             "getAccountInfo"
@@ -72,8 +161,7 @@ impl App {
             "params": [self.query, {"encoding": "base58"}]
         });
 
-        let client = Client::new();
-        let response = client
+        let response = self.client
             .post("https://rpc.devnet.soo.network/rpc")
             .header("Content-Type", "application/json")
             .json(&payload)
@@ -99,23 +187,16 @@ impl App {
 
 impl Widget for &App {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let title = Line::from(" SOONSCAN ".bold().red());
         let instruction = Line::from(vec![
             " Quit ".into(),
             "<Q> ".blue().bold(),
         ]);
 
         let block = Block::bordered()
-            .title(title.centered())
             .title_bottom(instruction.centered())
             .border_set(border::THICK);
 
-        let mut rows = vec![
-            Row::new(vec![
-                Cell::from("Query:").bold(),
-                Cell::from(self.query.clone().yellow()),
-            ]),
-        ];
+        let mut rows = vec![];
 
         if let Some(json_response) = &self.json_response {
             if let Some(result) = json_response.get("result").and_then(|r| r.as_object()) {
@@ -207,10 +288,10 @@ impl Widget for &App {
                     }
                 }
             }
-        } else {
+        } else if !self.query.is_empty() {
             rows.push(Row::new(vec![
                 Cell::from("Status:").bold(),
-                Cell::from("No response available".red()),
+                Cell::from("Loading...".yellow()),
             ]));
         }
 
@@ -226,3 +307,5 @@ impl Widget for &App {
         table.render(area, buf);
     }
 }
+
+

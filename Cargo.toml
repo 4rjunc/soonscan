@@ -13,9 +13,12 @@ categories = ["command-line-utilities"]
 
 [dependencies]
 chrono = "0.4.38"
+color-eyre = "0.6.3"
 crossterm = "0.28.1"
 ratatui = "0.29.0"
 reqwest = { version = "0.11", features = ["json"] }
 serde_json = "1.0.133"
 tokio = { version = "1", features = ["full"] }
+cli-clipboard = "0.4"
+
 
