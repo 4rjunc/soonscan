@@ -2,18 +2,7 @@ use std::io;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use reqwest::Client;
-use serde_json::Value;
-use ratatui::{
-    crossterm::event::{self, KeyCode, KeyEventKind, Event, KeyEvent},
-    buffer::Buffer,
-    layout::{Rect, Constraint, Layout},
-    style::{Style, Stylize},
-    symbols::border,
-    text::Line,
-    widgets::{Block, Widget, Table, Row, Cell, Paragraph},
-    Terminal, Frame,
-};
+use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 mod app;
 
