@@ -4,19 +4,19 @@ use tokio::sync::Mutex;
 
 use reqwest::Client;
 use serde_json::Value;
+
 use ratatui::{
-    crossterm::event::{self, KeyCode, KeyEventKind, Event, KeyEvent},
+    prelude::Alignment,
+    backend::CrosstermBackend,
     buffer::Buffer,
-    layout::{Rect, Constraint, Layout},
+    layout::{Constraint, Layout, Rect},
     style::{Style, Stylize},
     symbols::border,
     text::Line,
-    widgets::{Block, Widget, Table, Row, Cell, Paragraph},
+    widgets::{Block, Cell, Clear, Paragraph, Row, Table, Widget},
     Terminal, Frame,
 };
-use ratatui::backend::CrosstermBackend;
-
-
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
 
 #[derive(Debug)]
 pub struct App {
@@ -24,6 +24,7 @@ pub struct App {
     pub input_mode: InputMode,
     pub json_response: Option<Value>,
     pub exit: bool,
+    pub show_popup: bool,
     client: Client,
 }
 
@@ -40,6 +41,7 @@ impl Default for App {
             input_mode: InputMode::Normal,
             json_response: None,
             exit: false,
+            show_popup: false,
             client: Client::new(),
         }
     }
@@ -55,7 +57,7 @@ impl App {
                 }
                 terminal.draw(|frame| app.draw(frame))?;
             }
-            
+
             if let Ok(should_break) = App::handle_events(Arc::clone(&app)).await {
                 if should_break {
                     break;
@@ -65,32 +67,77 @@ impl App {
         Ok(())
     }
 
+    
     fn draw(&self, frame: &mut Frame) {
         let chunks = Layout::vertical([
-            Constraint::Length(3),  // Input field
-            Constraint::Min(1),     // Results area
-        ])
-        .split(frame.area());
+        Constraint::Length(3), // Input field
+        Constraint::Min(1),    // Results area
+    ])
+    .split(frame.area());
 
-        // Render input field
-        let input_title = match self.input_mode {
-            InputMode::Normal => " SOONSCAN (Press 'e' to edit) ".bold(),
-            InputMode::Editing => " SOONSCAN (Press 'Enter' to submit, 'Esc' to cancel) ".bold(),
-        };
+    // Create a layout for bottom instructions
+    let bottom_layout = Layout::horizontal([
+        Constraint::Percentage(50),
+        Constraint::Percentage(50),
+    ])
+    .split(chunks[0]);
 
-        let input = Paragraph::new(self.query.as_str())
-            .style(match self.input_mode {
-                InputMode::Normal => Style::default(),
-                InputMode::Editing => Style::default().yellow(),
-            })
-            .block(Block::bordered().title(input_title));
-        frame.render_widget(input, chunks[0]);
+    // Render input field
+    let input_title = match self.input_mode {
+        InputMode::Normal => " SOONSCAN ".red().bold(),
+        InputMode::Editing => " SOONSCAN ".red().bold(),
+    };
 
-        // Render results area
-        frame.render_widget(self, chunks[1]);
+    let input = Paragraph::new(self.query.as_str())
+        .style(match self.input_mode {
+            InputMode::Normal => Style::default(),
+            InputMode::Editing => Style::default().yellow(),
+        })
+        .block(Block::bordered().title(input_title));
+    
+    frame.render_widget(input, chunks[0]);
+
+    // Bottom right instructions
+    let instructions = Paragraph::new(match self.input_mode {
+        InputMode::Normal => " Press 'e' to edit ".blue().bold(),
+        InputMode::Editing => " Enter: Submit, Esc: Cancel ".blue().bold(),
+    })
+    .alignment(Alignment::Right);
+    
+    frame.render_widget(instructions, bottom_layout[1]);
+
+    // Render results area
+    frame.render_widget(self, chunks[1]);
+        // Render popup if active
+    if self.show_popup {
+        let popup_area = centered_rect(60, 40, frame.area());
+        let popup_block = Block::bordered()
+            .title("SoonScan - Help & Guide")
+            .border_style(Style::default().red());
+        
+        let help_text = vec![
+            Line::from(vec![" Retrieve transaction information".blue()]),
+            Line::from(vec![" View account balances, transaction status, and more".blue()]),
+            Line::from(vec!["".into()]),
+            Line::from(vec![" ⌨️ Keystrokes:".blue().bold()]),
+            Line::from(vec![" e      : Enter edit mode for query input".blue()]),
+            Line::from(vec![" Enter  : Submit query (account/transaction)".blue()]),
+            Line::from(vec![" Esc    : Cancel editing/close popup".blue()]),
+            Line::from(vec![" Ctrl+V : Paste content from clipboard".blue()]), 
+            Line::from(vec![" ?      : Toggle this help popup".blue()]),
+            Line::from(vec![" q      : Quit application".blue()]),
+        ];
+
+        let popup_text = Paragraph::new(help_text)
+            .block(popup_block)
+            .wrap(ratatui::widgets::Wrap { trim: true });
+
+        frame.render_widget(Clear, popup_area);
+        frame.render_widget(popup_text, popup_area);
+    }
     }
 
-     async fn handle_events(app: Arc<Mutex<App>>) -> io::Result<bool> {
+    async fn handle_events(app: Arc<Mutex<App>>) -> io::Result<bool> {
         if let Event::Key(key_event) = event::read()? {
             if key_event.kind == KeyEventKind::Press {
                 match key_event.code {
@@ -98,17 +145,17 @@ impl App {
                         let mut app = app.lock().await;
                         app.exit = true;
                         return Ok(true);
-                    },
+                    }
                     KeyCode::Char('e') => {
                         let mut app = app.lock().await;
                         if matches!(app.input_mode, InputMode::Normal) {
                             app.input_mode = InputMode::Editing;
                         }
-                    },
+                    }
                     KeyCode::Esc => {
                         let mut app = app.lock().await;
                         app.input_mode = InputMode::Normal;
-                    },
+                    }
                     KeyCode::Enter => {
                         let mut app = app.lock().await;
                         if matches!(app.input_mode, InputMode::Editing) {
@@ -117,36 +164,30 @@ impl App {
                                 app.fetch_data().await.unwrap_or_else(|e| eprintln!("Error: {}", e));
                             }
                         }
-                    },
-                    // Handle paste events (Ctrl+V)
-                    KeyCode::Char('v') => {
+                    }
+                    KeyCode::Char('?') => {
                         let mut app = app.lock().await;
-                        if matches!(app.input_mode, InputMode::Editing) && key_event.modifiers.contains(event::KeyModifiers::CONTROL) {
-                            if let Ok(clipboard_content) = cli_clipboard::get_contents() {
-                                app.query.push_str(&clipboard_content);
-                            }
-                        } else if matches!(app.input_mode, InputMode::Editing) {
-                            app.query.push('v');
-                        }
-                    },
+                        app.show_popup = !app.show_popup;
+                    }
                     KeyCode::Char(c) => {
                         let mut app = app.lock().await;
                         if matches!(app.input_mode, InputMode::Editing) {
                             app.query.push(c);
                         }
-                    },
+                    }
                     KeyCode::Backspace => {
                         let mut app = app.lock().await;
                         if matches!(app.input_mode, InputMode::Editing) {
                             app.query.pop();
                         }
-                    },
-                    _ => {},
+                    }
+                    _ => {}
                 }
             }
         }
         Ok(false)
     }
+
     async fn fetch_data(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         let method = if self.query.len() == 44 {
             "getAccountInfo"
@@ -161,7 +202,8 @@ impl App {
             "params": [self.query, {"encoding": "base58"}]
         });
 
-        let response = self.client
+        let response = self
+            .client
             .post("https://rpc.devnet.soo.network/rpc")
             .header("Content-Type", "application/json")
             .json(&payload)
@@ -187,18 +229,14 @@ impl App {
 
 impl Widget for &App {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let instruction = Line::from(vec![
-            " Quit ".into(),
-            "<Q> ".blue().bold(),
-        ]);
-
+        let instruction = Line::from(vec![" Quit ".into(), "<Q> ".blue().bold(), " | ".into(), " Help ".into(), " ? ".blue().bold()]);
         let block = Block::bordered()
             .title_bottom(instruction.centered())
             .border_set(border::THICK);
 
         let mut rows = vec![];
 
-        if let Some(json_response) = &self.json_response {
+         if let Some(json_response) = &self.json_response {
             if let Some(result) = json_response.get("result").and_then(|r| r.as_object()) {
                 // Account Info Response
                 if let Some(value) = result.get("value").and_then(|v| v.as_object()) {
@@ -306,6 +344,15 @@ impl Widget for &App {
 
         table.render(area, buf);
     }
-}
+        }
 
+// Helper to create centered rectangle for popup
+fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    let popup_width = area.width * percent_x / 100;
+    let popup_height = area.height * percent_y / 100;
+    let popup_x = (area.width - popup_width) / 2;
+    let popup_y = (area.height - popup_height) / 2;
+
+    Rect::new(popup_x, popup_y, popup_width, popup_height)
+}
 
