@@ -19,6 +19,8 @@ use ratatui::{
 };
 
 const GAUGE2_COLOR: Color = tailwind::GREEN.c800;
+const DEVNET_RPC: &str = "https://rpc.devnet.soo.network/rpc";
+const TESTNET_RPC: &str = "https://rpc.testnet.soo.network/rpc";
 
 #[derive(Debug)]
 pub struct App {
