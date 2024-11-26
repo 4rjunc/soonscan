@@ -371,10 +371,6 @@ impl Widget for &App {
                         .get("circulating")
                         .and_then(|c| c.as_i64())
                         .unwrap_or(0);
-                    let non_circulating_supply = value
-                        .get("nonCirculating")
-                        .and_then(|nc| nc.as_i64())
-                        .unwrap_or(0);
 
                     // Calculate the percentage of circulating supply
                     let circulating_percentage = if total_supply > 0 {
@@ -385,23 +381,10 @@ impl Widget for &App {
 
                     rows.extend(vec![
                         Row::new(vec![
-                            Cell::from("Total Supply:").bold(),
-                            Cell::from(
-                                format!("◎ {}", self.format_longnumber(total_supply)).yellow(),
-                            ),
-                        ]),
-                        Row::new(vec![
                             Cell::from("Circulating Supply:").bold(),
                             Cell::from(
-                                format!("◎ {}", self.format_longnumber(circulating_supply))
-                                    .yellow(),
-                            ),
-                        ]),
-                        Row::new(vec![
-                            Cell::from("Non-Circulating Supply:").bold(),
-                            Cell::from(
-                                format!("◎ {}", self.format_longnumber(non_circulating_supply))
-                                    .yellow(),
+                                format!("{} / {}", self.format_longnumber(circulating_supply), self.format_longnumber(total_supply))
+                                    .green(),
                             ),
                         ]),
                         Row::new(vec![
