@@ -1,4 +1,4 @@
-use std::io;
+use std::{fmt::format, io};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -6,22 +6,19 @@ use reqwest::Client;
 use serde_json::Value;
 
 use ratatui::{
-    prelude::Alignment,
-    backend::CrosstermBackend,
-    buffer::Buffer,
-    layout::{Constraint, Layout, Rect},
-    style::{Style, Stylize},
-    symbols::border,
-    text::Line,
-    widgets::{Block, Cell, Clear, Paragraph, Row, Table, Widget},
-    Terminal, Frame,
+    backend::CrosstermBackend, buffer::Buffer, layout::{Constraint, Layout, Rect}, prelude::Alignment, style::{palette::tailwind, Color, Style, Stylize}, symbols::border, text::{Line, Span}, widgets::{Block, Cell, Clear, Gauge, Paragraph, Row, Table, Widget}, Frame, Terminal
 };
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
+
+const GAUGE2_COLOR: Color = tailwind::GREEN.c800;
 
 #[derive(Debug)]
 pub struct App {
     pub query: String,
     pub input_mode: InputMode,
+    pub slot_info: Option<i64>,
+    pub transaction_info: Option<i64>,
+    pub supply_info: Option<Value>,
     pub json_response: Option<Value>,
     pub exit: bool,
     pub show_popup: bool,
@@ -39,6 +36,9 @@ impl Default for App {
         Self {
             query: String::new(),
             input_mode: InputMode::Normal,
+            slot_info: None,
+            transaction_info: None,
+            supply_info: None,
             json_response: None,
             exit: false,
             show_popup: false,
@@ -48,7 +48,83 @@ impl Default for App {
 }
 
 impl App {
+
+    //Fetch Intial Blockchain data 
+    pub async fn fetch_initial_blockchain_data(&mut self) -> Result<(), Box<dyn std::error::Error>>{
+
+        // Fetch slot Info
+        let slot_payload = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getSlot",
+        });
+
+        let slot_response = self
+            .client
+            .post("https://rpc.devnet.soo.network/rpc")
+            .header("Content-Type", "application/json")
+            .json(&slot_payload)
+            .send()
+            .await?;
+
+        if slot_response.status().is_success() {
+            let slot_json: Value = slot_response.json().await?;
+            self.slot_info = slot_json.get("result").and_then(|r| r.as_i64());
+        }
+
+        // Fetch Supply Info
+        let supply_payload = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getSupply"
+        });
+
+        let supply_response = self
+            .client
+            .post("https://rpc.devnet.soo.network/rpc")
+            .header("Content-Type", "application/json")
+            .json(&supply_payload)
+            .send()
+            .await?;
+
+        if supply_response.status().is_success() {
+            let supply_json: Value = supply_response.json().await?;
+            self.supply_info = supply_json.get("result").cloned();
+        }
+
+        // to get transaction count
+        let transcation_payload = serde_json::json!({
+            "jsonrpc":"2.0",
+            "id":1,
+            "method":"getTransactionCount"
+        });
+
+        let transaction_response = self
+            .client
+            .post("https://rpc.devnet.soo.network/rpc")
+            .header("Content-Type", "application/json")
+            .json(&transcation_payload)
+            .send()
+            .await?;
+
+        if transaction_response.status().is_success() {
+            let transaction_json: Value = transaction_response.json().await?;
+            self.transaction_info = transaction_json.get("result").and_then(|r| r.as_i64());
+        }
+            
+
+        Ok(())
+
+    }
+
     pub async fn run(app: Arc<Mutex<App>>, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
+
+        // Fetch initial data
+        {
+            let mut app = app.lock().await;
+            app.fetch_initial_blockchain_data().await.unwrap_or_else(|e| eprintln!("Error fetching initial data: {}", e));
+        }
+
         loop {
             {
                 let app = app.lock().await;
@@ -220,10 +296,32 @@ impl App {
         Ok(())
     }
 
-    fn format_timestamp(&self, timestamp: i64) -> String {
+   fn format_timestamp(&self, timestamp: i64) -> String {
         use chrono::{DateTime, TimeZone, Utc};
         let dt: DateTime<Utc> = Utc.timestamp_opt(timestamp, 0).unwrap();
         dt.format("%Y-%m-%d %H:%M:%S UTC").to_string()
+    }
+
+    
+    fn format_longnumber(&self, number: i64) -> String {
+        use std::fmt::Write;
+
+        let mut formatted = String::new();
+        let number_str = number.abs().to_string();
+        let len = number_str.len();
+
+        for (i, c) in number_str.chars().enumerate() {
+            if i > 0 && (len - i) % 3 == 0 {
+                write!(&mut formatted, ",").unwrap();
+            }
+            write!(&mut formatted, "{}", c).unwrap();
+        }
+
+        if number < 0 {
+            format!("-{}", formatted)
+        } else {
+            formatted
+        }
     }
 }
 
@@ -236,7 +334,65 @@ impl Widget for &App {
 
         let mut rows = vec![];
 
-         if let Some(json_response) = &self.json_response {
+        // Show blockchain data when no query is done!
+        if self.query.is_empty(){
+            if let Some(slot_info) = self.slot_info{
+                rows.push(Row::new(vec![
+                    Cell::from("Network").bold(),
+                    Cell::from("SoonScan Devnet").bold(),
+                ]));
+
+                rows.push(Row::new(vec![
+                    Cell::from("Slot:").bold(),
+                    Cell::from(self.format_longnumber(slot_info).yellow()),
+                ]));
+            }
+
+           
+           if let Some(supply_info) = &self.supply_info {
+                if let Some(value) = supply_info.get("value") {
+                    let total_supply = value.get("total").and_then(|t| t.as_i64()).unwrap_or(0);
+                    let circulating_supply = value.get("circulating").and_then(|c| c.as_i64()).unwrap_or(0);
+                    let non_circulating_supply = value.get("nonCirculating").and_then(|nc| nc.as_i64()).unwrap_or(0);
+
+                    // Calculate the percentage of circulating supply
+                    let circulating_percentage = if total_supply > 0 {
+                        (circulating_supply as f64 / total_supply as f64) * 100.0
+                    } else {
+                        0.0
+                    };
+
+                    rows.extend(vec![
+                        Row::new(vec![
+                            Cell::from("Total Supply:").bold(),
+                            Cell::from(format!("◎ {}", self.format_longnumber(total_supply)).yellow()),
+                        ]),
+                        Row::new(vec![
+                            Cell::from("Circulating Supply:").bold(),
+                            Cell::from(format!("◎ {}", self.format_longnumber(circulating_supply)).yellow()),
+                        ]),
+                        Row::new(vec![
+                            Cell::from("Non-Circulating Supply:").bold(),
+                            Cell::from(format!("◎ {}", self.format_longnumber(non_circulating_supply)).yellow()),
+                        ]),
+                        Row::new(vec![
+                            Cell::from("Circulating Percentage:").bold(),
+                            Cell::from(format!("{:.1}% is circulating", circulating_percentage).green()),
+                        ]),
+                    ]);
+                }
+            }
+
+          if let Some(transaction_info) = self.transaction_info{
+                rows.push(Row::new(vec![
+                    Cell::from("Transaction count:").bold(),
+                    Cell::from(self.format_longnumber(transaction_info).yellow()),
+                ]));
+          }
+
+        }
+
+         else if let Some(json_response) = &self.json_response {
             if let Some(result) = json_response.get("result").and_then(|r| r.as_object()) {
                 // Account Info Response
                 if let Some(value) = result.get("value").and_then(|v| v.as_object()) {
@@ -344,7 +500,7 @@ impl Widget for &App {
 
         table.render(area, buf);
     }
-        }
+}
 
 // Helper to create centered rectangle for popup
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
