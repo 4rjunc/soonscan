@@ -1,5 +1,7 @@
 # SoonScan
 
+![ss](./assets/ss.png)
+
 SoonScan is a Rust-based Text User Interface (TUI) application for exploring blocks on the Soon blockchain. It provides a simple, interactive way to display and navigate blockchain data in a terminal.
 
 ## Features
