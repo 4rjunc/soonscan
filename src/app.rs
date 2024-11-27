@@ -13,7 +13,7 @@ use ratatui::{
     prelude::Alignment,
     style::{Style, Stylize},
     symbols::border,
-    text::{Line},
+    text::Line,
     widgets::{Block, Cell, Clear, Paragraph, Row, Table, Widget},
     Frame, Terminal,
 };
@@ -27,7 +27,31 @@ use solana_transaction_status_client_types::{
 use std::str::FromStr;
 
 const DEVNET_RPC: &str = "https://rpc.devnet.soo.network/rpc";
-// const TESTNET_RPC: &str = "https://rpc.testnet.soo.network/rpc";
+const TESTNET_RPC: &str = "https://rpc.testnet.soo.network/rpc";
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RpcNetwork {
+    Devnet,
+    Testnet,
+}
+
+impl RpcNetwork {
+    // Method to get the RPC URL for the current network
+    pub fn get_url(&self) -> &'static str {
+        match self {
+            RpcNetwork::Devnet => DEVNET_RPC,
+            RpcNetwork::Testnet => TESTNET_RPC,
+        }
+    }
+
+    // Method to display the network name
+    pub fn name(&self) -> &'static str {
+        match self {
+            RpcNetwork::Devnet => "Devnet",
+            RpcNetwork::Testnet => "Testnet",
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct App {
@@ -37,10 +61,13 @@ pub struct App {
     pub transaction_info: Option<i64>,
     pub supply_info: Option<Value>,
     pub json_response: Option<Value>,
+    pub address_sign: Option<Value>,
     pub exit: bool,
     pub show_popup: bool,
+    pub current_rpc_network: RpcNetwork,  // Changed from String to RpcNetwork
     client: Client,
 }
+
 
 #[derive(Debug)]
 pub enum InputMode {
@@ -57,18 +84,35 @@ impl Default for App {
             transaction_info: None,
             supply_info: None,
             json_response: None,
+            address_sign: None,
             exit: false,
             show_popup: false,
+            current_rpc_network: RpcNetwork::Devnet,
             client: Client::new(),
         }
     }
 }
 
 impl App {
+    //toggle RPCs
+     pub fn toggle_rpc_network(&mut self) {
+        // Toggle between Devnet and Testnet
+        self.current_rpc_network = match self.current_rpc_network {
+            RpcNetwork::Devnet => RpcNetwork::Testnet,
+            RpcNetwork::Testnet => RpcNetwork::Devnet,
+        };
+    }
+
+    pub fn get_current_rpc_url(&self) -> &str {
+        self.current_rpc_network.get_url()
+    }        
+
     //Fetch Intial Blockchain data
     pub async fn fetch_initial_blockchain_data(
         &mut self,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        
+        let current_rpc_url = self.get_current_rpc_url();
         // Fetch slot Info
         let slot_payload = serde_json::json!({
             "jsonrpc": "2.0",
@@ -78,7 +122,7 @@ impl App {
 
         let slot_response = self
             .client
-            .post("https://rpc.devnet.soo.network/rpc")
+            .post(current_rpc_url)
             .header("Content-Type", "application/json")
             .json(&slot_payload)
             .send()
@@ -96,9 +140,10 @@ impl App {
             "method": "getSupply"
         });
 
+        let current_rpc_url = self.get_current_rpc_url();
         let supply_response = self
             .client
-            .post("https://rpc.devnet.soo.network/rpc")
+            .post(current_rpc_url)
             .header("Content-Type", "application/json")
             .json(&supply_payload)
             .send()
@@ -171,14 +216,14 @@ impl App {
 
         // Create a layout for bottom instructions
         let bottom_layout =
-            Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+            Layout::horizontal([Constraint::Percentage(40),Constraint::Percentage(20), Constraint::Percentage(40)])
                 .split(chunks[0]);
 
-        // Render input field
-        let input_title = match self.input_mode {
-            InputMode::Normal => " SOONSCAN ".red().bold(),
-            InputMode::Editing => " SOONSCAN ".red().bold(),
-        };
+        // Toggle with the N button
+        let input_title = match self.current_rpc_network {
+            RpcNetwork::Devnet => format!(" SOONSCAN {} ", " 🌐 Devnet ".green()),
+            RpcNetwork::Testnet => format!(" SOONSCAN {} ", " 🌐 Testnet ".blue()),
+        };        
 
         let input = Paragraph::new(self.query.as_str())
             .style(match self.input_mode {
@@ -196,7 +241,7 @@ impl App {
         })
         .alignment(Alignment::Right);
 
-        frame.render_widget(instructions, bottom_layout[1]);
+        frame.render_widget(instructions, bottom_layout[2]);
 
         // Render results area
         frame.render_widget(self, chunks[1]);
@@ -219,6 +264,7 @@ impl App {
                 Line::from(vec![" Esc    : Cancel editing/close popup".blue()]),
                 Line::from(vec![" Ctrl+V : Paste content from clipboard".blue()]),
                 Line::from(vec![" ?      : Toggle this help popup".blue()]),
+                Line::from(vec![" n      : Toggle between Devnet and Testnet".blue()]),
                 Line::from(vec![" q      : Quit application".blue()]),
             ];
 
@@ -245,6 +291,10 @@ impl App {
                         if matches!(app.input_mode, InputMode::Normal) {
                             app.input_mode = InputMode::Editing;
                         }
+                    }
+                    KeyCode::Char('n') => {
+                        let mut app = app.lock().await;
+                        app.toggle_rpc_network();
                     }
                     KeyCode::Esc => {
                         let mut app = app.lock().await;
@@ -304,12 +354,12 @@ impl App {
 
         // Check if the query is a valid public key
         if let Ok(pubkey) = Pubkey::from_str(&self.query) {
-            println!("Valid public key detected: {}", pubkey);
+            // println!("Valid public key detected: {}", pubkey);
 
             // Fetch account information using Solana RPC client
             match client.get_account(&pubkey) {
                 Ok(account) => {
-                    println!("Account found: {:?}", account);
+                    // println!("Account found: {:?}", account);
                     let account_info = serde_json::json!({
                         "lamports": account.lamports,
                         "owner": account.owner.to_string(),
@@ -317,14 +367,27 @@ impl App {
                         "executable": account.executable,
                     });
                     self.json_response = Some(account_info);
+
+                    // Fetch signatures related to an account
+                    match client.get_signatures_for_address(&pubkey) {
+                        Ok(signatures) => {
+                            self.address_sign = Some(serde_json::json!(signatures));
+                        }
+                        Err(err) => {
+                            eprintln!("Failed to fetch signatures: {}", err);
+                            self.address_sign = None;
+                        }
+                    }
                 }
                 Err(err) => {
                     eprintln!("Failed to fetch account info: {}", err);
                     self.json_response = None;
+                    self.address_sign = None;
                 }
             }
+
         } else if let Ok(signature) = Signature::from_str(&self.query) {
-            println!("Valid transaction signature detected: {}", signature);
+            // println!("Valid transaction signature detected: {}", signature);
             // Fetch transaction details using Solana RPC client
             match client.get_transaction(&signature, UiTransactionEncoding::Json) {
                 Ok(transaction) => {
@@ -481,6 +544,7 @@ impl Widget for &App {
                 ]));
             }
         } else if let Some(json_response) = &self.json_response {
+        // println!("Address Signatures: {:?}", self.address_sign);
             if let Some(response_obj) = json_response.as_object() {
                 if response_obj.contains_key("lamports") {
                     // This is an account response
@@ -548,9 +612,81 @@ impl Widget for &App {
                             ),
                         ]),
                     ]);
+
+
+if let Some(address_sign) = &self.address_sign {
+    // Check if the value inside `address_sign` is an array
+    if let Some(address_signatures) = address_sign.as_array() {
+        // Iterate over the array of signatures
+
+            rows.push(Row::new(vec![
+                Cell::from(" "),
+            ]));
+
+
+            rows.push(Row::new(vec![
+                Cell::from("Transaction History").bold(),
+            ]));
+
+
+            rows.push(Row::new(vec![
+                Cell::from(" "),
+            ]));
+
+            rows.push(Row::new(vec![
+                Cell::from("Transaction").bold(),
+                Cell::from("Block").bold(),
+                Cell::from("Timestamp").bold(),
+                Cell::from("Result").bold(),
+
+            ]));
+
+
+        for signature_info in address_signatures {
+            // Extract relevant fields from each signature info object
+            let signature = signature_info
+                .get("signature")
+                .and_then(|s| s.as_str())
+                .unwrap_or("N/A");
+            
+            let slot = signature_info
+                .get("slot")
+                .and_then(|s| s.as_u64())
+                .unwrap_or(0);
+
+            let block_time = signature_info
+                .get("blockTime")
+                                    .and_then(|bt| bt.as_u64())
+                                    .map_or("N/A".to_string(), |time| {
+                                        self.format_timestamp(time as i64)
+
+                                    });
+
+            let confirmation_status = signature_info
+                .get("confirmationStatus")
+                .and_then(|s| s.as_str())
+                .unwrap_or("Unknown");
+
+
+
+            // Create rows for each signature's details
+            rows.push(Row::new(vec![
+                Cell::from(format!("{}...", &signature[0..23]).yellow()),
+
+                Cell::from(format!("{}", self.format_longnumber(slot as i64)).to_string().blue()),
+
+                Cell::from(block_time.yellow()),
+                
+                Cell::from(confirmation_status.green()),
+            ]));
+        }
+    }
+}
+
+
                 } else if response_obj.contains_key("slot") {
                     // This is a transaction response
-                    println!("Transaction Data: {:?}", self.json_response);
+                    // println!("Transaction Data: {:?}", self.json_response);
                     rows.extend(vec![
                         Row::new(vec![
                             Cell::from("Type:").bold(),
@@ -617,7 +753,7 @@ impl Widget for &App {
                         ]),
                         Row::new(vec![
                             Cell::from("Signatures:").bold(),
-                            Cell::from(format!("{}", self.query)).red(),
+                            Cell::from(format!("{}...", &self.query[0..24])).red(),
                         ]),
                     ]);
                 } else {
@@ -635,7 +771,7 @@ impl Widget for &App {
             ]));
         }
 
-        let widths = [Constraint::Length(20), Constraint::Percentage(80)];
+        let widths = [Constraint::Length(40), Constraint::Percentage(20), Constraint::Percentage(15), Constraint::Percentage(15)];
 
         let table = Table::new(rows, &widths).block(block).column_spacing(2);
 
@@ -643,7 +779,6 @@ impl Widget for &App {
     }
 }
 
-// Helper to create centered rectangle for popup
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let popup_width = area.width * percent_x / 100;
     let popup_height = area.height * percent_y / 100;
