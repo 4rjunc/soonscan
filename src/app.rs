@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::{fmt::format, io};
+use std::io;
 use tokio::sync::Mutex;
 
 use reqwest::Client;
@@ -11,16 +11,23 @@ use ratatui::{
     buffer::Buffer,
     layout::{Constraint, Layout, Rect},
     prelude::Alignment,
-    style::{palette::tailwind, Color, Style, Stylize},
+    style::{Style, Stylize},
     symbols::border,
-    text::{Line, Span},
-    widgets::{Block, Cell, Clear, Gauge, Paragraph, Row, Table, Widget},
+    text::{Line},
+    widgets::{Block, Cell, Clear, Paragraph, Row, Table, Widget},
     Frame, Terminal,
 };
 
-const GAUGE2_COLOR: Color = tailwind::GREEN.c800;
+// RPC Client
+use solana_client::rpc_client::RpcClient;
+use solana_sdk::{pubkey::Pubkey, signature::Signature};
+use solana_transaction_status_client_types::{
+    EncodedTransaction::Json, UiMessage::Raw, UiTransactionEncoding,
+};
+use std::str::FromStr;
+
 const DEVNET_RPC: &str = "https://rpc.devnet.soo.network/rpc";
-const TESTNET_RPC: &str = "https://rpc.testnet.soo.network/rpc";
+// const TESTNET_RPC: &str = "https://rpc.testnet.soo.network/rpc";
 
 #[derive(Debug)]
 pub struct App {
@@ -258,6 +265,19 @@ impl App {
                         let mut app = app.lock().await;
                         app.show_popup = !app.show_popup;
                     }
+                    // Handle paste events (Ctrl+V)
+                    KeyCode::Char('v') => {
+                        let mut app = app.lock().await;
+                        if matches!(app.input_mode, InputMode::Editing)
+                            && key_event.modifiers.contains(event::KeyModifiers::CONTROL)
+                        {
+                            if let Ok(clipboard_content) = cli_clipboard::get_contents() {
+                                app.query.push_str(&clipboard_content);
+                            }
+                        } else if matches!(app.input_mode, InputMode::Editing) {
+                            app.query.push('v');
+                        }
+                    }
                     KeyCode::Char(c) => {
                         let mut app = app.lock().await;
                         if matches!(app.input_mode, InputMode::Editing) {
@@ -278,37 +298,88 @@ impl App {
     }
 
     async fn fetch_data(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let method = if self.query.len() == 44 {
-            "getAccountInfo"
+        // Define the RPC URL
+        let url = DEVNET_RPC;
+        let client = RpcClient::new(url.to_string());
+
+        // Check if the query is a valid public key
+        if let Ok(pubkey) = Pubkey::from_str(&self.query) {
+            println!("Valid public key detected: {}", pubkey);
+
+            // Fetch account information using Solana RPC client
+            match client.get_account(&pubkey) {
+                Ok(account) => {
+                    println!("Account found: {:?}", account);
+                    let account_info = serde_json::json!({
+                        "lamports": account.lamports,
+                        "owner": account.owner.to_string(),
+                        "space": account.data.len(),
+                        "executable": account.executable,
+                    });
+                    self.json_response = Some(account_info);
+                }
+                Err(err) => {
+                    eprintln!("Failed to fetch account info: {}", err);
+                    self.json_response = None;
+                }
+            }
+        } else if let Ok(signature) = Signature::from_str(&self.query) {
+            println!("Valid transaction signature detected: {}", signature);
+            // Fetch transaction details using Solana RPC client
+            match client.get_transaction(&signature, UiTransactionEncoding::Json) {
+                Ok(transaction) => {
+                    let transaction_info = serde_json::json!({
+                        "slot": transaction.slot,
+                        "blockTime": transaction.block_time,
+                        "meta": {
+                            "status": transaction.transaction.meta.as_ref().map(|m| format!("{:?}", m.status)),
+                            "err": transaction.transaction.meta.as_ref().and_then(|m| m.err.clone()),
+                            "fee": transaction.transaction.meta.as_ref().map(|m| m.fee).unwrap_or(0),
+                            "preBalances": transaction.transaction.meta.as_ref().map(|m| m.pre_balances.clone()),
+                            "postBalances": transaction.transaction.meta.as_ref().map(|m| m.post_balances.clone()),
+                            "signatures": match &transaction.transaction.transaction {
+                                                    Json(ui_transaction) => ui_transaction.signatures.clone(),
+                                                    _ => vec![]
+                            },
+                            "accountKeys": match &transaction.transaction.transaction {
+                                                    Json(ui_transaction) => match &ui_transaction.message {
+                                                        Raw(raw_message) => raw_message.account_keys.clone(),
+                                                        _ => vec![]
+                                                    },
+                                                    _ => vec![]
+                                                },
+                                                "recentBlockhash": match &transaction.transaction.transaction {
+                                                    Json(ui_transaction) => match &ui_transaction.message {
+                                                        Raw(raw_message) => raw_message.recent_blockhash.clone(),
+                                                        _ => String::new()
+                                                    },
+                                                    _ => String::new()
+                                                },
+                                                "instructions": match &transaction.transaction.transaction {
+                                                    Json(ui_transaction) => match &ui_transaction.message {
+                                                        Raw(raw_message) => raw_message.instructions.clone(),
+                                                        _ => vec![]
+                                                    },
+                                                    _ => vec![]
+                                                },
+                            "logMessages": transaction.transaction.meta.as_ref().and_then(|m| Some(m.log_messages.clone())),
+                            "computeUnitsConsumed": transaction.transaction.meta.as_ref().and_then(|m| Some(m.compute_units_consumed.clone()))
+                        },
+                    });
+                    self.json_response = Some(transaction_info);
+                }
+                Err(err) => {
+                    eprintln!("Failed to fetch transaction info: {}", err);
+                    self.json_response = None;
+                }
+            }
         } else {
-            "getTransaction"
-        };
-
-        let payload = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": method,
-            "params": [self.query, {"encoding": "base58"}]
-        });
-
-        let response = self
-            .client
-            .post("https://rpc.devnet.soo.network/rpc")
-            .header("Content-Type", "application/json")
-            .json(&payload)
-            .send()
-            .await?;
-
-        if response.status().is_success() {
-            self.json_response = Some(response.json().await?);
-        } else {
-            eprintln!("Request failed with status: {}", response.status());
+            eprintln!("Query is neither a valid public key nor a transaction signature.");
             self.json_response = None;
         }
 
         Ok(())
     }
-
     fn format_timestamp(&self, timestamp: i64) -> String {
         use chrono::{DateTime, TimeZone, Utc};
         let dt: DateTime<Utc> = Utc.timestamp_opt(timestamp, 0).unwrap();
@@ -385,8 +456,12 @@ impl Widget for &App {
                         Row::new(vec![
                             Cell::from("Circulating Supply:").bold(),
                             Cell::from(
-                                format!("{} / {}", self.format_longnumber(circulating_supply), self.format_longnumber(total_supply))
-                                    .green(),
+                                format!(
+                                    "{} / {}",
+                                    self.format_longnumber(circulating_supply),
+                                    self.format_longnumber(total_supply)
+                                )
+                                .green(),
                             ),
                         ]),
                         Row::new(vec![
@@ -406,40 +481,62 @@ impl Widget for &App {
                 ]));
             }
         } else if let Some(json_response) = &self.json_response {
-            if let Some(result) = json_response.get("result").and_then(|r| r.as_object()) {
-                // Account Info Response
-                if let Some(value) = result.get("value").and_then(|v| v.as_object()) {
+            if let Some(response_obj) = json_response.as_object() {
+                if response_obj.contains_key("lamports") {
+                    // This is an account response
                     rows.extend(vec![
                         Row::new(vec![
                             Cell::from("Type:").bold(),
                             Cell::from("Account Info".blue()),
                         ]),
                         Row::new(vec![
-                            Cell::from("Balance:").bold(),
+                            Cell::from("Balance (SOL):").bold(),
                             Cell::from(
                                 format!(
                                     "◎ {:.9}",
-                                    value.get("lamports").and_then(|l| l.as_u64()).unwrap_or(0)
-                                        as f64
+                                    response_obj
+                                        .get("lamports")
+                                        .and_then(|l| l.as_u64())
+                                        .unwrap_or(0) as f64
                                         / 1_000_000_000.0
                                 )
                                 .yellow(),
                             ),
                         ]),
                         Row::new(vec![
-                            Cell::from("Owner:").bold(),
+                            Cell::from("Allocated Data Size:").bold(),
                             Cell::from(
-                                value
+                                format!(
+                                    "{} byte(s)",
+                                    response_obj
+                                        .get("space")
+                                        .and_then(|s| s.as_u64())
+                                        .unwrap_or(0)
+                                )
+                                .yellow(),
+                            ),
+                        ]),
+                        Row::new(vec![
+                            Cell::from("Assigned Program Id:").bold(),
+                            Cell::from(
+                                response_obj
                                     .get("owner")
                                     .and_then(|o| o.as_str())
-                                    .unwrap_or("N/A")
-                                    .yellow(),
+                                    .map(|owner| {
+                                        if owner == "11111111111111111111111111111111" {
+                                            "System Program".to_string()
+                                        } else {
+                                            owner.to_string()
+                                        }
+                                    })
+                                    .unwrap_or("N/A".to_string())
+                                    .green(),
                             ),
                         ]),
                         Row::new(vec![
                             Cell::from("Executable:").bold(),
                             Cell::from(
-                                if value
+                                if response_obj
                                     .get("executable")
                                     .and_then(|e| e.as_bool())
                                     .unwrap_or(false)
@@ -450,91 +547,85 @@ impl Widget for &App {
                                 },
                             ),
                         ]),
-                        Row::new(vec![
-                            Cell::from("Space:").bold(),
-                            Cell::from(
-                                value
-                                    .get("space")
-                                    .and_then(|s| s.as_u64())
-                                    .unwrap_or(0)
-                                    .to_string()
-                                    .yellow(),
-                            ),
-                        ]),
                     ]);
-                }
-                // Transaction Response
-                else if let Some(meta) = result.get("meta").and_then(|m| m.as_object()) {
+                } else if response_obj.contains_key("slot") {
+                    // This is a transaction response
+                    println!("Transaction Data: {:?}", self.json_response);
                     rows.extend(vec![
                         Row::new(vec![
                             Cell::from("Type:").bold(),
-                            Cell::from("Transaction".blue()),
+                            Cell::from("Transaction Info".blue()),
+                        ]),
+                        Row::new(vec![
+                            Cell::from("Slot:").bold(),
+                            Cell::from(
+                                response_obj
+                                    .get("slot")
+                                    .and_then(|s| s.as_u64())
+                                    .map_or("N/A".to_string(), |slot| {
+                                        self.format_longnumber(slot as i64)
+                                    })
+                                    .yellow(),
+                            ),
                         ]),
                         Row::new(vec![
                             Cell::from("Block Time:").bold(),
                             Cell::from(
-                                result
+                                response_obj
                                     .get("blockTime")
-                                    .and_then(|t| t.as_i64())
-                                    .map(|t| self.format_timestamp(t))
-                                    .unwrap_or_else(|| "N/A".to_string())
+                                    .and_then(|bt| bt.as_u64())
+                                    .map_or("N/A".to_string(), |time| {
+                                        self.format_timestamp(time as i64)
+                                    })
+                                    .yellow(),
+                            ),
+                        ]),
+                        Row::new(vec![
+                            Cell::from("Fee (SOL):").bold(),
+                            Cell::from(
+                                response_obj
+                                    .get("meta")
+                                    .and_then(|meta| meta.get("fee"))
+                                    .and_then(|f| f.as_u64())
+                                    .map_or("N/A".to_string(), |fee| {
+                                        format!("◎ {:.9}", fee as f64 / 1_000_000_000.0)
+                                    })
                                     .yellow(),
                             ),
                         ]),
                         Row::new(vec![
                             Cell::from("Status:").bold(),
-                            Cell::from(if meta.get("status").and_then(|s| s.get("Ok")).is_some() {
-                                "Success".green()
-                            } else {
-                                "Failed".red()
-                            }),
-                        ]),
-                        Row::new(vec![
-                            Cell::from("Fee:").bold(),
                             Cell::from(
-                                format!(
-                                    "◎ {:.9}",
-                                    meta.get("fee").and_then(|f| f.as_u64()).unwrap_or(0) as f64
-                                        / 1_000_000_000.0
-                                )
-                                .yellow(),
+                                response_obj
+                                    .get("meta")
+                                    .and_then(|meta| meta.get("status"))
+                                    .and_then(|status| {
+                                        if let Some(status_str) = status.as_str() {
+                                            // Handle the 'Ok(())' status
+                                            if status_str == "Ok(())" {
+                                                Some("SUCCESS".to_string())
+                                            } else {
+                                                Some("Err".to_string())
+                                            }
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .unwrap_or("Unknown".to_string())
+                                    .green(),
                             ),
                         ]),
                         Row::new(vec![
-                            Cell::from("Compute Units:").bold(),
-                            Cell::from(
-                                meta.get("computeUnitsConsumed")
-                                    .and_then(|c| c.as_u64())
-                                    .map(|c| c.to_string())
-                                    .unwrap_or_else(|| "N/A".to_string())
-                                    .yellow(),
-                            ),
+                            Cell::from("Signatures:").bold(),
+                            Cell::from(format!("{}", self.query)).red(),
                         ]),
                     ]);
-
-                    // Add balance changes
-                    if let (Some(pre), Some(post)) = (
-                        meta.get("preBalances").and_then(|b| b.as_array()),
-                        meta.get("postBalances").and_then(|b| b.as_array()),
-                    ) {
-                        for (i, (pre_bal, post_bal)) in pre.iter().zip(post.iter()).enumerate() {
-                            let pre_value = pre_bal.as_u64().unwrap_or(0) as f64 / 1_000_000_000.0;
-                            let post_value =
-                                post_bal.as_u64().unwrap_or(0) as f64 / 1_000_000_000.0;
-                            let change = post_value - pre_value;
-
-                            rows.push(Row::new(vec![
-                                Cell::from(format!("Balance Change {}:", i)).bold(),
-                                Cell::from(
-                                    format!(
-                                        "◎ {:.9} → ◎ {:.9} (Δ {:.9})",
-                                        pre_value, post_value, change
-                                    )
-                                    .yellow(),
-                                ),
-                            ]));
-                        }
-                    }
+                } else {
+                    // Handle unknown or unsupported response type
+                    rows.push(Row::new(vec![
+                        Cell::from("Error:").bold(),
+                        Cell::from("Unsupported response type.".red()),
+                    ]));
                 }
             }
         } else if !self.query.is_empty() {
